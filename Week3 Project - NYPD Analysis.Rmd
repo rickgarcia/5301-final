@@ -1,0 +1,306 @@
+---
+title: "NYPD Shooting Analysis"
+author: "R. Garcia"
+date: "2024-08-09"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+library(data.table)
+library(viridis)
+library(vcd)
+```
+
+
+## Data Download
+
+The first step in any analysis is to obtain the required data. Here, in this step, we perform the initial Data import from the City of New York site
+```{r nypd_imported}
+nypd_data_raw <- read_csv("https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD")
+
+summary(nypd_data_raw)
+```
+
+From the summary, we can see that we have a set of column names that we need to interpret. Some of the columns, such as `OCCUR_DATE` are fairly straightforward, but others, such as `BORO`, which is short for "borough", might require some knowledge of the specific municipality, as other areas use similar but distinct verbiage such as "Ward", "Parish", or "District" to denote zones in or around an urban area. Other columns, such as `LOC_OF_OCCUR_DESC` aren't very obvious, so we need to inspect the data manually to see how we might interpret what's in there.
+
+## Preliminary Data Inspection, Cleanup and Preparation
+
+For our initial data cleanup, we're going to remove columns for GPS location, as any interesting geolocation analysis is probably a bit beyond the scope of this assignment. From inspection, we see that `JURISDICTION_CODE` is a column which only has 3 unique integer values which we can't easily interpret the meaning of. That column is unlikely to be of much utility, so that too can be removed. We will also convert the character string dates and times into native date/time data.
+
+```{r nypd_data_cleanup, echo=TRUE}
+
+# convert to data.table
+nypd_data <- data.table(nypd_data_raw)
+
+unique(nypd_data$JURISDICTION_CODE)
+
+# remove unused columns
+nypd_data <- nypd_data %>% select(-c(X_COORD_CD:Lon_Lat))
+nypd_data <- nypd_data %>% select(-c(JURISDICTION_CODE))
+
+# change date/time strings to date/time values
+nypd_data <- nypd_data %>% mutate(OCCUR_DATE = mdy(OCCUR_DATE))
+nypd_data <- nypd_data %>% mutate(OCCUR_TIME = hms(OCCUR_TIME))
+```
+
+## Secondary Data Inspection
+
+We want to look into the data on some of the columns that we can't immediately determine the usefulness of by name. We're looking to see what kind of values we have in various fields that may be of interest for analysis.
+
+```{r data_preparation, echo=TRUE}
+nypd_data[, .(count = .N), by = "LOCATION_DESC"]
+nypd_data[, .(count = .N), by = "BORO"]
+nypd_data[, .(count = .N), by = "LOC_CLASSFCTN_DESC"]
+nypd_data[, .(count = .N), by = "LOC_OF_OCCUR_DESC"]
+
+nypd_data[!is.na("LOC_CLASSFCTN_DESC"), .N, by=PRECINCT]
+nypd_data[!is.na("LOC_OF_OCCURCLASSFCTN_DESC"), .N, by=PRECINCT]
+```
+
+From the initial data inspection, we can see that some of the columns offer limited utility. `LOC_OF_OCCUR_DESC`, for example, has only 3 distinct values, `INSIDE`, `OUTSIDE`, and `NA`. Further, the `NA` values make up over 90% of the entries, meaning that the non-empty values which we do have for that column are of limited meaning. Another potentially limited column is `LOC_CLASSFCTN_DESC`, which also has a high rate of `NA` values. Curiously, the number of `NA` values in the two columns matches exactly, so a future useful direction may be to see if any precincts have consistent reporting on this value, and may offer a potential insight into the rates at which these values occur in general. However, we see from inspection that reports that have both values are spread across precincts and boroughs, indicating that we do not have sufficient data to inspect those values, so we drop them from this analysis to tighten our scope. Additionally, we see that the column `LOCATION_DESC` has character strings of `"(null)"` values which are strings and not actually null and should be changed to `NA` for consistency.
+
+```{r secondary_cleanup, echo=TRUE}
+nypd_data[LOCATION_DESC == "(null)", LOCATION_DESC := NA]
+
+nypd_data[VIC_RACE == "(null)", VIC_RACE := NA]
+nypd_data[PERP_RACE == "(null)", PERP_RACE := NA]
+nypd_data[VIC_AGE_GROUP == "(null)", VIC_AGE_GROUP := NA]
+nypd_data[PERP_AGE_GROUP == "(null)", PERP_AGE_GROUP := NA]
+nypd_data[VIC_SEX == "(null)", VIC_SEX := NA]
+nypd_data[PERP_SEX == "(null)", PERP_SEX := NA]
+
+nypd_data <- nypd_data %>% select(-c(LOC_OF_OCCUR_DESC))
+nypd_data <- nypd_data %>% select(-c(LOC_CLASSFCTN_DESC))
+```
+
+
+## Analysis and Visualization
+
+### Initial visualiation of potential areas of interest
+
+Create some initial visualizations to get a sense of how the data breaks down across various lines. On this initial graph, I'm breaking down the dates to strip off the years to see if we can identify any season trends in the data. I primarily chose this because I wanted to try adding in a smoothed line to show a curve for the seasonal trends. 
+
+```{r first_analysis, echo=FALSE}
+
+# create a column for day of year only - curious about seasonal trends
+nypd_data[, DayOfYear := format(OCCUR_DATE, "%m-%d")]
+
+# Count occurrences of each DayOfYear
+day_counts <- nypd_data[, .(Count = .N), by = DayOfYear]
+
+# Create a complete sequence of days
+all_days <- data.table(DayOfYear = seq(as.Date("2024-01-01"), as.Date("2024-12-31"), by = "day"))
+all_days[, DayOfYear := format(DayOfYear, "%m-%d")]
+
+# Merge the counts with all days
+ordered_days <- merge(all_days, day_counts, by = "DayOfYear", all.x = TRUE)
+ordered_days[is.na(Count), Count := 0]
+
+# Convert DayOfYear to Date for proper ordering
+ordered_days[, DateOrder := as.Date(paste0("2024-", DayOfYear), format = "%Y-%m-%d")]
+
+# Create the plot
+ordered_days %>% ggplot(aes(x = DateOrder, y = Count)) +
+  geom_bar(stat = "identity", fill = "skyblue", alpha=0.7) +
+  geom_smooth(method="loess", se=TRUE, color="red", linetype="solid") +
+  scale_x_date(date_labels = "%b %d", date_breaks = "1 month") +
+  labs(title = "Frequency of Days of Year",
+       x = "Day of Year",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+cat("Day with maximum shootings:")
+ordered_days[Count == max(Count), .(DayOfYear)]
+
+```
+
+
+On these next three, I create relatively simple bar graphs to create breakdowns by age, race and sex.
+
+```{r second_analysis, echo=FALSE}
+#
+age_counts <- nypd_data[, .(Count = .N), by = "VIC_AGE_GROUP"]
+# Order the races by count (descending)
+age_counts <- age_counts[order(-Count)]
+
+# Create the plot
+age_counts %>% ggplot(aes(x = reorder(VIC_AGE_GROUP, -Count), y = Count)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  geom_text(aes(label = Count), vjust = -0.3) +  # Add count labels on top of bars
+  labs(title = "Age Breakdown of Data",
+       x = "Age",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+# Same thing, by race
+race_counts <- nypd_data[, .(Count = .N), by = "VIC_RACE"]
+# Order the races by count (descending)
+race_counts <- race_counts[order(-Count)]
+# Create the plot
+race_counts %>% ggplot(aes(x = reorder(VIC_RACE, -Count), y = Count)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  geom_text(aes(label = Count), vjust = -0.3) +  # Add count labels on top of bars
+  labs(title = "Racial Breakdown of Data",
+       x = "Race",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+# Sex breakdown
+sex_counts <- nypd_data[, .(Count = .N), by = "VIC_SEX"]
+# Order the races by count (descending)
+sex_counts <- sex_counts[order(-Count)]
+# Create the plot
+sex_counts %>% ggplot(aes(x = reorder(VIC_SEX, -Count), y = Count)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  geom_text(aes(label = Count), vjust = -0.3) +  # Add count labels on top of bars
+  labs(title = "Breakdown of Data by Sex",
+       x = "Sex",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+
+### Investigate Correlation between Age and Race
+
+From the initial visualizations, we can see that age and race are two factors that, when taken apart, seem highly correlated to shootings. Sex is also another factor, but it is so highly correlated to males that it might not be worth investigating nuances on that factor in this analysis. So next, we want to look deeper and see how age and race together are related to shootings, and how we can represent this data visually for both factors.
+
+
+#### Heatmap Visualization
+
+To create a visualization for both age and race, we create a heatmap to try to visualize outliers of age and racial groupings.
+
+```{r correlation_ar, echo=FALSE}
+## correlation between race/age group
+
+# some more cleanup
+nypd_data[VIC_AGE_GROUP == "1022", VIC_AGE_GROUP := NA]
+nypd_data_AR <- nypd_data[!is.na(VIC_RACE)]
+nypd_data_AR <- nypd_data_AR[!is.na(VIC_AGE_GROUP)]
+
+freq_table <- nypd_data_AR[!(is.na(VIC_RACE) | is.na(VIC_AGE_GROUP)),
+                           .N, 
+                           by = .(`VIC_RACE`, `VIC_AGE_GROUP`)]
+
+totals <- sum(freq_table$N)
+freq_table[, percentage := N / totals * 100]
+
+freq_table %>% ggplot(aes(x = VIC_AGE_GROUP, y = VIC_RACE, fill = percentage)) +
+  geom_tile() +
+  geom_text(aes(label = sprintf("%.1f%%", percentage)), 
+            size = 3, vjust = 0.5, color = ifelse(freq_table$percentage > 50, "white", "black")) +
+  scale_fill_viridis(option = "plasma", direction = -1, 
+                     breaks = c(0, 25, 50, 75, 100),
+                     limits = c(0, max(freq_table$percentage))) +
+  labs(title = "Heatmap of NYPD Data",
+       x = "Victim Age Group", 
+       y = "Victim Race",
+       fill = "Percentage") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text.y = element_text(hjust = 1),
+        plot.title = element_text(hjust = 0.5))
+
+```
+
+From the heatmap, we can see that there are distinct areas where particular groups are significantly over-represented in the population. The biggest outlier is two age groups of "18-24" and "25-44" for blacks. There is a smaller but easily identifiable rise for hispanics, both black and white.
+
+
+#### ChiSq Correlation Model and Distribution Chart
+
+Another part of the assignment was to create a model. So here, we create a model to give us a look at the distribution of the age of the victims within their race. In this model, I'm using chi square value and Cramer's V.
+
+```{r chisqtest, echo=FALSE}
+
+cont_table <- table(nypd_data$VIC_RACE, nypd_data$VIC_AGE_GROUP)
+chi_val <- chisq.test(cont_table)
+cramers_v <- assocstats(cont_table)$cramer
+
+cat("Chi-square test:\n")
+chi_val
+
+cat("\nCramer's V:")
+cramers_v
+
+nypd_data %>% ggplot(aes(x = VIC_AGE_GROUP, fill = VIC_RACE)) +
+  geom_bar(position = "fill") +
+  labs(title = "Distribution of Victim Race by Age Group",
+       x = "Victim Age Group",
+       y = "Proportion",
+       fill = "Victim Race") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+From this result, we see there is a very low p-value, indicating that the two factors, age and race, are highly likely to be correlated in shootings, and there is likely a meaningful association. However, the Cramer's V score is only 0.14, which denotes an association, but not a strong one. These two factors tell us together that while there is a significant association between age, race, and shootings, a significant portion of the data also falls outside of those two factors, meaning they alone do not significantly explain shooting frequency. On the graph, I created this primarily to try out a new style of plot, and it offers us a look at a breakdown of the racial representations across age groups, and here, we see how victim's demographics change as age increases, which can be an interesting trend.
+
+
+#### Seasonal Shootings by Murder flag
+
+One of the other initial ideas I had to look at the data was on seasonal trends. We also had some data provided on statistical murders and non-statistical murders, although I don't know exactly what the distinction there is. So I'm going to break the two factors apart, graph them, and see if it tells me anything.
+
+```{r data_transformed, echo=FALSE}
+# Extract (Month)
+nypd_data_transformed <- nypd_data %>% mutate (MONTH = as.integer((month(OCCUR_DATE))))
+
+# Group (By: Season)
+nypd_data_by_month <- nypd_data %>%
+    mutate (MONTH = as.integer((month(OCCUR_DATE)))) %>% 
+        group_by(MONTH) %>% 
+          summarize(STAT_MURDER = sum(ifelse(STATISTICAL_MURDER_FLAG, 1, 0)),
+                    NON_STAT_MURDER = sum(ifelse(STATISTICAL_MURDER_FLAG, 0, 1)))                  
+  
+nypd_data_by_month
+
+ggplot(nypd_data_by_month) +
+    geom_line(aes(x=MONTH, y=STAT_MURDER, color="Statistical Murder")) +
+    geom_line(aes(x=MONTH, y=NON_STAT_MURDER, color="Non-Statistical Murder")) +
+    geom_point(aes(x = MONTH, y = STAT_MURDER, color = "Statistical Murder")) +
+    geom_point(aes(x = MONTH, y = NON_STAT_MURDER, color = "Non-Statistical Murder")) +
+  scale_x_continuous(breaks = 1:12, labels = month.abb) +
+  scale_color_manual(values = c("Statistical Murder" = "red", "Non-Statistical Murder" = "blue")) +
+  labs(title = "Murder Statistics by Month",
+       x = "Month",
+       y = "Number of Murders",
+       color = "Stat Types") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+Here, while we can still see the seasonal trends reflected in both factors, the statistical murder make up a pretty small percentage of the shootings. It's not apparent if this tells us anything, but I do question if I am interpreting that column correctly. More research and lookups are required there.
+
+
+## Identification of Bias
+Sources of bias in the data include:
+* Error and bias in the initial data collection and recording 
+* Incomplete data and differences in data collection among precincts
+  
+Personal Bias:
+* Assumptions made by the researcher and analyst, including which data to trust and include.
+* Assumptions made about the meaning of the data and some of the field names.
+
+## Summary and Conclusion
+
+From the data, we are able to conclude that there is a strong correlation between several factors in the data and shootings. Strongest correlations are race, age, and gender.
+
+There are also significant indications that seasonal trends are involved as well, as there is significant increase in summer months. Differences in data collection and recording make it difficult to determine if there are signicant differences in shooting rates in various boroughs, or if the differences are due to variations in data recording.
+
+
+#### R session information
+
+```{r sessioninfo, echo=FALSE}
+sessionInfo()
+```

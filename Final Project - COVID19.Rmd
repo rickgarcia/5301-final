@@ -1,0 +1,419 @@
+---
+title: "DTSA-5301 - Final Project - COVID-19"
+author: "R. Garcia"
+date: "2024-08-18"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+if (requireNamespace("usmap", quietly=TRUE)) {
+  library(usmap)
+} else {
+  print("usmap library not available")
+}
+library(gridExtra)
+```
+
+## Data Download
+
+Download the chosen datasets from the identified URLs. I've added a manual `TRUE/FALSE` flag to allow for local storage of the data if desired by the researcher.
+
+```{r download_data, echo=TRUE}
+
+if (TRUE) {
+    base_path <- 'https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/'
+    urls <- c("time_series_covid19_confirmed_US.csv",
+              "time_series_covid19_confirmed_global.csv",
+              "time_series_covid19_deaths_US.csv",
+              "time_series_covid19_deaths_global.csv")
+    world_population <- 'https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv'
+} else {
+  base_path = "data/" 
+    urls <- c("time_series_covid19_confirmed_US.csv",
+              "time_series_covid19_confirmed_global.csv",
+              "time_series_covid19_deaths_US.csv",
+              "time_series_covid19_deaths_global.csv")
+    world_population <- 'data/UID_ISO_FIPS_LookUp_Table.csv'
+}
+
+
+US_cases <- read_csv(paste0(base_path, urls[1]))
+global_cases <- read_csv(paste0(base_path, urls[2]))
+US_deaths <- read_csv(paste0(base_path, urls[3]))
+global_deaths <- read_csv(paste0(base_path, urls[4]))
+
+global_population <- read_csv(world_population)
+
+```
+
+### Data cleanup
+
+First, we clean up `global_deaths` as per lecture instructions.
+
+```{r cleanup_global_deaths, echo=TRUE}
+
+# remove unnecessary columns
+global_deaths <- global_deaths %>% select(-`Lat`, -`Long`)
+# convert the dates to rows
+global_deaths <- global_deaths %>%
+    pivot_longer(cols = -c('Province/State', 'Country/Region'),
+                 names_to = "date",
+                 values_to = "deaths")
+
+```
+
+Second, `global_cases`
+
+```{r cleanup_global_cases, echo=TRUE}
+
+# remove unnecessary columns
+global_cases <- global_cases %>% select(-`Lat`, -`Long`)
+# convert the dates to rows
+global_cases <- global_cases %>%
+    pivot_longer(cols = -c('Province/State', 'Country/Region'),
+                 names_to = "date",
+                 values_to = "cases")
+
+```
+
+Now do the same for US statistics
+
+```{r cleanup_US_cases, echo=TRUE}
+
+# remove unnecessary columns
+US_cases <- US_cases %>% select(-`UID`, -`iso2`, -`iso3`, -`code3`,
+                                -`FIPS`, -`Admin2`, -`Lat`, -`Long_`)
+# convert the dates to rows
+US_cases <- US_cases %>%
+    pivot_longer(cols = -c('Province_State', 'Country_Region', 'Combined_Key'),
+                 names_to = "date",
+                 values_to = "cases")
+```
+
+We can do some additional cleanup and remove columns that we are not going to be using later on in the analysis.
+
+```{r cleanup_US_deaths, echo=TRUE}
+
+# remove unnecessary columns
+US_deaths <- US_deaths %>% select(-`UID`, -`iso2`, -`iso3`, -`code3`,
+                                -`FIPS`, -`Admin2`, -`Lat`, -`Long_`)
+# convert the dates to rows
+US_deaths <- US_deaths %>%
+    pivot_longer(cols = -c('Province_State', 'Country_Region', 'Combined_Key', 'Population'),
+                 names_to = "date",
+                 values_to = "deaths")
+
+```
+
+
+### Combine case and death datasets
+
+Combine the global cases and death datasets and add columns to match the US datasets
+
+```{r combine_global, echo=TRUE}
+
+# join the cases and deaths tables
+global <- global_cases %>% 
+    full_join(global_deaths) %>% 
+      rename(Country_Region = `Country/Region`,
+             Province_State = `Province/State`) %>%
+    mutate (date = mdy(date))
+
+# filter out the zeros
+global <- global %>% filter(cases > 0)
+
+# create a combined key to match US data columns
+global <- global %>%
+    unite("Combined_Key",
+          c("Province_State", "Country_Region"),
+          sep = ", ",
+          na.rm = TRUE,
+          remove = FALSE)
+
+global_population <- global_population %>% 
+    select(-c("Lat", "Long_", "Combined_Key", "code3", "iso2", 
+              "iso3", "Admin2", "UID", "FIPS"))
+
+global <- global %>%
+    left_join(global_population, by=c("Province_State", "Country_Region")) %>%
+    select(Province_State, Country_Region, date, cases, deaths, Population, Combined_Key)
+
+# output a summary
+summary(global)
+```
+
+Join the US datasets and filter out the 0 case instances.
+
+```{r combine_US, echo=TRUE}
+
+# join the cases and deaths tables
+US <- US_cases %>% 
+    full_join(US_deaths) %>% 
+    mutate (date = mdy(date))
+
+US <- US %>% filter(cases > 0)
+
+summary(US)
+```
+
+
+### Analyze US by State
+
+Instead of simply looking at an individual state, we apply the summary across all states.
+
+```{r combine_US_states, echo=TRUE}
+
+US_by_state <- US %>%
+    group_by(Province_State, Country_Region, date) %>%
+    summarize(cases=sum(cases), deaths=sum(deaths),
+              Population=sum(Population)) %>%
+    mutate(deaths_per_mill = (deaths * 1000000/Population)) %>%
+    select(Province_State, "Country_Region", "date", "cases", "deaths",
+           "deaths_per_mill", "Population") %>%
+    ungroup()
+
+US_totals <- US_by_state %>%
+    group_by(Country_Region, date) %>%
+    summarize(cases=sum(cases), deaths=sum(deaths), 
+              Population=sum(Population)) %>%
+    mutate(deaths_per_mill = deaths*1000000/Population) %>%
+    select(Country_Region, date, cases, deaths, deaths_per_mill, Population) %>%
+    ungroup()
+```
+
+Using the US totals, create a plot for COVID-19 progression
+
+```{r plot_US_totals, echo=FALSE}
+US_totals %>%
+    filter(cases > 0) %>%
+    ggplot(aes(x = date, y = cases)) +
+    geom_line(aes(color = "cases")) +
+    geom_point(aes(color="cases")) +
+    geom_line(aes(y = deaths, color = "deaths")) + 
+    geom_point(aes(y = deaths, color = "deaths")) +
+    scale_y_log10() +
+    theme(legend.position="bottom", axis.text.x=element_text(angle=90)) +
+    labs(title="COVID19 in US", y=NULL)
+```
+
+Now select a single state to plot
+
+```{r plot_US_by_state, echo=FALSE}
+state <- "Texas"
+
+US_by_state %>%
+    filter(Province_State == state) %>%
+    filter(cases > 0) %>%
+    ggplot(aes(x = date, y = cases)) +
+    geom_line(aes(color = "cases")) +
+    geom_point(aes(color="cases")) +
+    geom_line(aes(y = deaths, color = "deaths")) + 
+    geom_point(aes(y = deaths, color = "deaths")) +
+    scale_y_log10() +
+    theme(legend.position="bottom", axis.text.x=element_text(angle=90)) +
+    labs(title=paste("COVID19 in", state), y=NULL)
+
+max(US_totals$deaths)
+```
+
+In this next graph, we look at the data collected and graph out the total deaths and daily cases.
+
+```{r look_into_daily_deaths, echo=FALSE}
+
+max(US_totals$date)
+max(US_totals$deaths)
+
+US_by_state <- US_by_state %>%
+    mutate(new_cases = cases - lag(cases),
+           new_deaths = deaths - lag(deaths))
+US_totals <- US_totals %>%
+    mutate(new_cases = cases - lag(cases),
+           new_deaths = deaths - lag(deaths))
+
+US_totals[is.na(US_totals)] <- 0
+US_totals %>%
+    filter(cases > 0) %>%
+    ggplot(aes(x = date, y = new_cases)) +
+    geom_line(aes(color = "new_cases")) +
+    geom_point(aes(color = "new_cases")) +
+    geom_line(aes(y = deaths, color = "new_deaths")) + 
+    geom_point(aes(y = deaths, color = "new_deaths")) +
+#    scale_y_log10() +
+    theme(legend.position="bottom", axis.text.x=element_text(angle=90)) +
+    labs(title="COVID19 in US Daily", y=NULL)
+
+
+```
+
+Next, we want to do some state by state visualizations for infections, deaths, and death rate for confirmed infections. Prep the data first.
+
+```{r state_totals, echo=FALSE}
+US_state_totals <- US_by_state %>%
+    group_by(Province_State) %>%
+    summarize(deaths = max(deaths),
+              cases = max(cases),
+              population = max(Population),
+              cases_per_thou = 1000*cases/population,
+              deaths_per_thou = 1000*deaths/population,
+              deaths_per_case = deaths/cases) %>%
+    filter(cases > 0, population > 0)
+
+US_state_totals %>% slice_min(deaths_per_thou, n=10) %>%
+    select(deaths_per_thou, cases_per_thou, everything())
+
+US_state_totals %>% slice_max(deaths_per_thou, n=10) %>%
+    select(deaths_per_thou, cases_per_thou, everything())
+
+```
+
+These plots require the `usmap` library. Please install if you do not have it already.
+
+```{r us_case_plot, echo=FALSE}
+
+if (requireNamespace("usmap", quietly=TRUE)) {
+
+  case_map_data <- US_state_totals %>%
+    select(Province_State, cases_per_thou) %>%
+    rename(state = Province_State, value = cases_per_thou)
+  
+  # Create the map
+  covid_map <- plot_usmap(data = case_map_data, values = "value", color = "black") + 
+    scale_fill_continuous(
+      low = "white", 
+      high = "red", 
+      name = "Cases per 1,000 people", 
+      label = scales::comma
+    ) + 
+    theme(legend.position = "right") +
+    labs(title = "COVID-19 Infection Rates per 1,000 People by State",
+         subtitle = "Based on cumulative data")
+  
+  # Display the map
+  print(covid_map)
+
+} else {
+    print("usmap library is not available. Please install to create this visualization")
+}
+
+```
+
+```{r us_infections_plot, echo=FALSE}
+
+if (requireNamespace("usmap", quietly=TRUE)) {
+  
+  death_map_data <- US_state_totals %>%
+    select(Province_State, deaths_per_thou) %>%
+    rename(state = Province_State, value = deaths_per_thou)
+  
+  # Create the map
+  covid_map <- plot_usmap(data = death_map_data, values = "value", color = "black") + 
+    scale_fill_continuous(
+      low = "white", 
+      high = "red", 
+      name = "Deaths per 1,000 people", 
+      label = scales::comma
+    ) + 
+    theme(legend.position = "right") +
+    labs(title = "COVID-19 Death Rates per 1,000 People by State",
+         subtitle = "Based on cumulative data")
+  
+  # Display the map
+  print(covid_map)
+  
+} else {
+    print("usmap library is not available. Please install to create this visualization")
+}
+```
+
+
+```{r deaths_per_case, echo=FALSE}
+
+if (requireNamespace("usmap", quietly=TRUE)) {
+
+  fatality_data <- US_state_totals %>%
+    mutate(deaths_per_case_percent = deaths_per_case * 100) %>%
+    arrange(desc(deaths_per_case_percent))
+  
+  
+  map_data <- fatality_data %>%
+    select(Province_State, deaths_per_case_percent) %>%
+    rename(state = Province_State, value = deaths_per_case_percent)
+  
+  fatality_map <- plot_usmap(data = map_data, values = "value", color = "black") + 
+    scale_fill_gradient(
+      low = "yellow", 
+      high = "red", 
+      name = "Case Fatality Rate (%)", 
+      label = scales::percent_format(scale = 1)
+    ) + 
+    theme(legend.position = "right") +
+    labs(title = "COVID-19 Case Fatality Rate by State",
+         subtitle = "Percentage of confirmed cases resulting in death")
+  
+  print(fatality_map)
+} else {
+  print("usmap library is not available. Please install to create this visualization")
+}
+
+
+```
+
+
+
+### Creating a Model for the data
+
+Here, we continue looking at the death rate per infections by creating a linear regression model. This can help indicate of the effectiveness of a state's healthcare systems for treatment of COVID-19 given the infection rates.
+
+```{r linear_model, echo=FALSE}
+
+lm_model <- lm(deaths_per_thou ~ cases_per_thou, data=US_state_totals)
+summary(lm_model)
+
+residuals_plot <- ggplot(data.frame(fitted = fitted(lm_model), 
+                                    residuals = residuals(lm_model)), 
+                         aes(x = fitted, y = residuals)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(x = "Fitted Values", y = "Residuals", 
+       title = "Residuals vs. Fitted Values") +
+  theme_minimal()
+
+print(residuals_plot)
+
+qq_plot <- ggplot(data.frame(residuals = residuals(lm_model)), aes(sample = residuals)) +
+  stat_qq() +
+  stat_qq_line(color = "red") +
+  labs(x = "Theoretical Quantiles", y = "Sample Quantiles", 
+       title = "Q-Q Plot of Residuals") +
+  theme_minimal()
+
+print(qq_plot)
+
+
+```
+
+
+So here, we create a linear regression model based on the cases and deaths, and the expected relation between those two values. Although we see that our p-value is low and it indicates a meaningful correlation, summaries of derived statistics can be difficult to interpret, so we also create a couple of visualizations for the model. First, we do a residuals plot. This plot shows the model's residuals (differences between observed and predicted values) against the fitted values. This helps check for constant variance and linearity. Ideally, you want to see a random scatter of points with no clear patterns, which is what we generally see here, although we can see some slight clustering near the middle, and no visible outliers on the high y side. The second plot is a Q-Q plot, which compares the distribution of the model's residuals to a theoretical normal distribution. Points following the diagonal line suggest normally distributed residuals, which is an assumption of linear regression. In this case, we see that our values stay near the normal line up to a standard deviation in either direction, but begin to deviate outside of that. This makes intuitive sense, as it would indicate that areas with either very high or very low case loads have results that reflect how much strain their health systems were subjected to.
+
+
+### Sources of Bias
+
+Sources of bias in COVID-19 data have been generally identified among the following areas:
+
+* Testing availability
+* Population density (urban/rural)
+* Demographic differences
+* Healthcare system capacity
+
+My personal bias which I noticed while going thru the problem was that I used my own state as the one which I initially wanted to look at more indepth. I mitigated this by extending the same analysis on other states and doing per-capita comparisons. More broadly, this could be mitigated by masking state names so that analyses can be developed and run blindly across various states.
+
+
+```{r sessioninfo, echo=FALSE}
+sessionInfo()
+```
+
